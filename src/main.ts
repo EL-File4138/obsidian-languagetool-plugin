@@ -4,7 +4,13 @@ import { ChangeSpec, StateEffect } from "@codemirror/state";
 import { endpointFromUrl, LTOptions, LTSettings, LTSettingsTab, SUGGESTIONS } from "./settings";
 import * as api from "api";
 import { underlineExtension } from "./editor/extension";
-import { addUnderline, clearAllUnderlines, clearMatchingUnderlines, clearUnderlinesInRange, underlineDecoration } from "./editor/underlines";
+import {
+    addUnderline,
+    clearAllUnderlines,
+    clearMatchingUnderlines,
+    clearUnderlinesInRange,
+    underlineDecoration,
+} from "./editor/underlines";
 import { cmpIgnoreCase, setDifference, setIntersect, setUnion } from "./helpers";
 import * as markdown from "./markdown/parser";
 
@@ -57,8 +63,7 @@ export default class LanguageToolPlugin extends Plugin {
         this.registerMenuItems();
 
         // Configure frontmatter suggestions
-        if (this.settings.options.injectProperties)
-            this.injectProperties(true);
+        if (this.settings.options.injectProperties) this.injectProperties(true);
 
         // Spellcheck Dictionary
         const dictionary: Set<string> = new Set(
@@ -178,6 +183,32 @@ export default class LanguageToolPlugin extends Plugin {
                 if (firstMatch != null) {
                     editorView.dispatch({
                         selection: { anchor: firstMatch.from, head: firstMatch.to },
+                    });
+                }
+            },
+        });
+        this.addCommand({
+            id: "previous",
+            name: "Jump to previous suggestion",
+            icon: "chevron-left",
+            editorCheckCallback: (checking, editor) => {
+                // @ts-expect-error, not typed
+                const editorView = editor.cm as EditorView;
+                const cursorOffset = editor.posToOffset(editor.getCursor("from"));
+                let lastMatch = null as { from: number; to: number } | null;
+                editorView.state
+                    .field(underlineDecoration)
+                    .between(0, cursorOffset - 1, (from, to) => {
+                        if (!lastMatch || lastMatch.from < from) {
+                            lastMatch = { from, to };
+                        }
+                    });
+                if (checking) {
+                    return lastMatch != null;
+                }
+                if (lastMatch != null) {
+                    editorView.dispatch({
+                        selection: { anchor: lastMatch.from, head: lastMatch.to },
                     });
                 }
             },
