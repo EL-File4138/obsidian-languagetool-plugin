@@ -29,7 +29,7 @@ After installing and enabling the plugin, you can set up hotkeys (under Settings
 - **"Clear Suggestions"** clears the document or selected text of all red underlines from words or passages that were not corrected or changed.
 - **"Toggle Automatic Checking"** toggles ON/OFF the automatic spellchecking function as you write or change the document's contents.
 
-**LanguageTool tries to auto-detect the language used.** Selecting a specific language (under `Settings / LanguageTool / Static language`) usually is not necessary. This feature enables the user to spellcheck in different languages within the same document (e.g., a dissertation written in English with quotes in a foreign language), which is ordinarily not possible with the built-in spellcheck function of Obsidian.
+**LanguageTool tries to auto-detect the language used.** Selecting a specific language (under `Settings / LanguageTool / Static language`) usually is not necessary. If you want auto-detection to stay within a known set of languages, use `Settings / LanguageTool / Possible languages` and only suggestions in those languages will be kept. This feature enables the user to spellcheck in different languages within the same document (e.g., a dissertation written in English with quotes in a foreign language), which is ordinarily not possible with the built-in spellcheck function of Obsidian.
 
 ## Ignoring Files
 
@@ -46,6 +46,9 @@ The following settings can be in the note's properties:
 ```md
 ---
 lt-language: en-US     // text: language code or "auto"
+lt-possibleLanguages: // multitext: Allowed auto-detected languages
+  - en-US
+  - de-DE
 lt-picky: true         // boolean: Provide more style suggestions
 lt-autoCheck: true     // boolean: Check as you type
 lt-dictionary:         // multitext: Ingored word

@@ -20,6 +20,11 @@ export interface LTRange {
     to: number;
 }
 
+export interface LTCheckResult {
+    matches: (LTMatch & { range: LTRange })[];
+    detectedLanguage?: string;
+}
+
 /**
  * The main function of LanguageTool, checking text for spell/grammar errors.
  */
@@ -27,7 +32,7 @@ export async function check(
     settings: Readonly<LTOptions>,
     offset: number,
     annotated: AnnotatedText,
-): Promise<(LTMatch & { range: LTRange })[]> {
+): Promise<LTCheckResult> {
     const data = annotated.stringify();
 
     const lang = settings.staticLanguage ?? "auto";
@@ -68,7 +73,9 @@ export async function check(
     if (res.json == null) throw new Error(`Error processing response from LanguageTool.`);
 
     const matches = jsonPathA<object>("$.matches[*]", res.json);
-    return matches.map(match => {
+    return {
+        detectedLanguage: detectedLanguageCode(res.json),
+        matches: matches.map(match => {
         const from = jsonPath<number>("$.offset@number()", match);
         const to = from + jsonPath<number>("$.length@number()", match);
         return {
@@ -80,7 +87,8 @@ export async function check(
             categoryId: jsonPath<string>("$.rule.category.id@string()", match),
             ruleId: jsonPath<string>("$.rule.id@string()", match),
         };
-    });
+        }),
+    };
 }
 
 export interface Language {
@@ -257,4 +265,13 @@ function sUrl(url: string, search: Record<string, string>): URL {
     const u = new URL(url);
     u.search = new URLSearchParams(search).toString();
     return u;
+}
+
+function detectedLanguageCode(json: string | number | boolean | object | object[] | null): string | undefined {
+    return (
+        JSONPath({ path: "$.language.detectedLanguage.code", json, wrap: false, eval: false }) ??
+        JSONPath({ path: "$.language.code", json, wrap: false, eval: false }) ??
+        JSONPath({ path: "$.detectedLanguages[0].code", json, wrap: false, eval: false }) ??
+        undefined
+    ) as string | undefined;
 }

@@ -84,6 +84,7 @@ export default class LanguageToolPlugin extends Plugin {
     public injectProperties(inject: boolean) {
         const properties = {
             "lt-language": "text",
+            "lt-possibleLanguages": "multitext",
             "lt-picky": "checkbox",
             "lt-autoCheck": "checkbox",
             "lt-dictionary": "multitext",
@@ -513,6 +514,9 @@ export default class LanguageToolPlugin extends Plugin {
 
         if (cache?.frontmatter != null) {
             const language = cache.frontmatter["lt-language"] ?? cache.frontmatter["lt_language"];
+            const possibleLanguages =
+                cache.frontmatter["lt-possibleLanguages"] ??
+                cache.frontmatter["lt_possibleLanguages"];
             const picky = cache.frontmatter["lt-picky"];
             const autoCheck = cache.frontmatter["lt-autoCheck"];
             const dictionary = cache.frontmatter["lt-dictionary"];
@@ -522,6 +526,10 @@ export default class LanguageToolPlugin extends Plugin {
             // Beware: shallow clone
             let settings = { ...this.settings.options };
             if (typeof language === "string") settings.staticLanguage = language;
+            if (typeof possibleLanguages === "string")
+                settings.possibleLanguages = normalizePossibleLanguages(possibleLanguages.split(","));
+            if (Array.isArray(possibleLanguages))
+                settings.possibleLanguages = normalizePossibleLanguages(possibleLanguages);
             if (typeof autoCheck === "boolean") settings.shouldAutoCheck = autoCheck;
             if (typeof picky === "boolean") settings.pickyMode = picky;
             if (Array.isArray(dictionary)) settings.dictionary = dictionary;
@@ -566,7 +574,8 @@ export default class LanguageToolPlugin extends Plugin {
             console.info(`Checking ${annotations.length()} characters...`);
             console.debug("Text", JSON.stringify(annotations, undefined, "  "));
 
-            matches = await api.check(settings, offset, annotations);
+            const result = await api.check(settings, offset, annotations);
+            matches = isAllowedDetectedLanguage(settings, result.detectedLanguage) ? result.matches : [];
             // update range to the checked text
             if (range) range = { from: offset, to: offset + annotations.length() };
         } catch (e) {
@@ -678,4 +687,20 @@ export default class LanguageToolPlugin extends Plugin {
             console.error("Failed sync spellcheck with LanguageTool", e);
         }
     }
+}
+
+function normalizePossibleLanguages(values: string[]): string[] {
+    return [...new Set(values.map(value => value.trim()).filter(Boolean))];
+}
+
+function isAllowedDetectedLanguage(settings: LTOptions, detectedLanguage?: string): boolean {
+    const possibleLanguages = settings.possibleLanguages;
+    if (settings.staticLanguage || !possibleLanguages?.length || !detectedLanguage) return true;
+
+    const detected = detectedLanguage.toLowerCase();
+    const detectedBase = detected.split("-")[0];
+    return possibleLanguages.some(language => {
+        const allowed = language.toLowerCase();
+        return allowed === detected || allowed.split("-")[0] === detectedBase;
+    });
 }

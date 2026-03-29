@@ -114,6 +114,7 @@ export interface LTOptions {
 
     motherTongue?: string;
     staticLanguage?: string;
+    possibleLanguages?: string[];
     languageVariety: Record<string, string>;
 
     dictionary: string[];
@@ -153,6 +154,10 @@ interface LanguageListener {
 function languageVariants(languages: api.Language[], code: string): Record<string, string> {
     languages = languages.filter(v => v.code === code).filter(v => v.longCode !== v.code);
     return Object.fromEntries(languages.map(v => [v.longCode, v.name]));
+}
+
+function normalizeLanguageCodes(value: string): string[] {
+    return [...new Set(value.split(",").map(v => v.trim()).filter(Boolean))];
 }
 
 export class LTSettingsTab extends PluginSettingTab {
@@ -466,6 +471,23 @@ export class LTSettingsTab extends PluginSettingTab {
                             });
                         });
                 });
+            });
+
+        new Setting(containerEl)
+            .setName("Possible languages")
+            .setDesc(
+                "Comma-separated list of allowed auto-detected language codes. " +
+                    "Suggestions in other detected languages will be ignored.",
+            )
+            .addText(text => {
+                text.setPlaceholder("en-US,de-DE")
+                    .setValue((settings.options.possibleLanguages ?? []).join(", "))
+                    .onChange(async value => {
+                        const possibleLanguages = normalizeLanguageCodes(value);
+                        await settings.update({
+                            possibleLanguages: possibleLanguages.length ? possibleLanguages : undefined,
+                        });
+                    });
             });
 
         new Setting(containerEl)
