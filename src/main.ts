@@ -560,10 +560,13 @@ export default class LanguageToolPlugin extends Plugin {
 
         let matches: (api.LTMatch & { range: api.LTRange })[];
         let longNotice: Notice | undefined = undefined;
+        let syntax: markdown.SyntaxTree;
         try {
             this.setStatusBarWorking();
 
-            let { offset, annotations } = await markdown.parseAndAnnotate(text, range);
+            syntax = new markdown.SyntaxTree(text);
+
+            let { offset, annotations } = syntax.annotate(range);
             // reduce request size
             offset += annotations.optimize();
             if (annotations.length() === 0) return false;
@@ -609,6 +612,19 @@ export default class LanguageToolPlugin extends Plugin {
                 // Ignore typos that are in the spellcheck dictionary
                 if (match.categoryId === "TYPOS" && spellcheckDictionary.includes(match.text))
                     continue;
+
+                // Ignore whitespace lints inside tables
+                if (
+                    match.categoryId === "WHITESPACE" &&
+                    (syntax.isInside(match.range.from, "table") ||
+                        syntax.isInside(match.range.to, "table"))
+                )
+                    continue;
+
+                // TODO: LanguageTool's ranges often include whitespace before/after lints.
+                // As whitespace is used to hide markdown markup, applying these lints often breaks the format of
+                // for example paragraphs, lists, or tables.
+
                 effects.push(addUnderline.of(match));
             }
         }
