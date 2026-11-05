@@ -4,11 +4,12 @@ This plugin for [Obsidian.md](https://obsidian.md) integrates [LanguageTool](htt
 
 <img src="demos/image.png" style="border:1px solid black" />
 
-> This is a fork of the original [obsidian-languagetool-plugin](https://github.com/Clemens-E/obsidian-languagetool-plugin), with the following changes:
+> This fork combines [Wrenger's LanguageTool plugin](https://github.com/wrenger/obsidian-languagetool) with changes from the original [obsidian-languagetool-plugin](https://github.com/Clemens-E/obsidian-languagetool-plugin) and local additions:
 >
 > - Support for synonyms and mother tongue
 > - Tooltip button for disabling rules
 > - Note-specific settings
+> - Allowed detected languages and next/previous suggestion navigation
 > - Clean up the codebase, and fix multiple bugs and freezes
 
 **Note:** if you are worried about the privacy of your notes, you should self-host LanguageTool locally on your PC or on a server.
@@ -28,10 +29,17 @@ After installing and enabling the plugin, you can set up hotkeys (under Settings
 - **"Check Text"** checks the whole document in view if no text is selected. If you want to check only a word, sentence, or paragraph, select the text of choice and press the keyboard shortcut you have previously set. Click on the red underlined word that LanguageTool identified as a possible spelling mistake to get corrective suggestions in a popover window, with the option to add the word to a personal dictionary.
 - **"Clear Suggestions"** clears the document or selected text of all red underlines from words or passages that were not corrected or changed.
 - **"Toggle Automatic Checking"** toggles ON/OFF the automatic spellchecking function as you write or change the document's contents.
+- **"Toggle automatic checking for current document"** saves an override in the note's frontmatter. Toggling back to the global behavior removes the override.
+- **"Jump to next suggestion"** and **"Jump to previous suggestion"** select and scroll to a suggestion.
+- **"Ignore current suggestion"** ignores the same text and rule for the rest of the session.
+
+Enable **Ribbon icon** in settings for a manual-check button on desktop or mobile. Press `Escape` to close a suggestion tooltip without removing the underline.
 
 **LanguageTool tries to auto-detect the language used.** Selecting a specific language (under `Settings / LanguageTool / Static language`) usually is not necessary. This feature enables the user to spellcheck in different languages within the same document (e.g., a dissertation written in English with quotes in a foreign language), which is ordinarily not possible with the built-in spellcheck function of Obsidian.
 
-**Custom Spellchecker Dictionary:** You can add words to this dictionary directly from the editor and remove them again in the Obsidian settings (`Settings / LanguageTool / Spellcheck Dictionary`).
+**Custom Spellchecker Dictionary:** Words added from suggestions go into both the plugin dictionary and Obsidian's spellcheck dictionary. The confirmation offers an undo. LanguageTool Premium dictionary synchronization remains optional. Manage the plugin dictionary under `Settings / LanguageTool / Spellcheck dictionary`; Obsidian dictionary entries are managed separately.
+
+API keys are migrated from older plaintext settings into Obsidian SecretStorage. Secrets are device-local and do not sync, so configure the key separately on each device. Version 1.6.1 requires Obsidian 1.13.6 or newer for the declarative settings interface.
 
 ## Note-Specific Configuration
 
@@ -41,20 +49,34 @@ The following settings can be in the note's properties:
 
 ```md
 ---
-lt-language: en-US     // text: language code or "auto"
-lt-picky: true         // boolean: Provide more style suggestions
-lt-autoCheck: true     // boolean: Check as you type
-lt-dictionary:         // multitext: Ingored word
+lt-language: en-US     # language code or "auto"
+lt-possibleLanguages:  # allowed detected languages; ignored with a static language
+  - en
+  - de
+lt-picky: true         # provide more style suggestions
+lt-autocheck: true     # check as you type
+lt-dictionary:         # ignored words for this note
   - foo
   - bar
-lt-disabledRules:      // multitext: Ignored rules
+lt-disabledRules:      # ignored rules
   - ARROWS
-lt-disabledCategories: // multitext: Ignored categories
+lt-disabledCategories: # ignored categories
   - STYLE
 ---
 
 # Some Note...
 ```
+
+The existing `lt-autoCheck`, `lt_language`, and `lt_possibleLanguages` keys remain supported. Language pins also accept `language` or `lang`; `lt-language` takes precedence. Set `lt-language: auto` to override a globally fixed language. Allowed languages accept a YAML list or a comma-separated string.
+
+To exclude a note from both manual and automatic checks, add the exact frontmatter tag `lt-ignore`:
+
+```yaml
+tags:
+  - lt-ignore
+```
+
+Automatic-check delays are constrained by the endpoint: at least 3000 ms for public, 750 ms for premium, or 50 ms for custom servers.
 
 ## Premium Accounts
 
@@ -71,9 +93,11 @@ Configure your email, API key, and the new URL (https://api.languagetoolplus.com
 
 Under **Language → Preferred languages**, select multiple languages to favor during automatic detection. These are hints, not a restriction: other languages may still be detected. Static language selection takes precedence; regional spelling remains controlled by **Language varieties**. Detection bias depends on the server's language-detection setup (for example, fastText).
 
+**Language → Allowed detected languages** instead filters suggestions after detection. Leave it empty to allow all languages. Regional codes with the same base language are accepted, and a static language bypasses the filter.
+
 ## Tests
 
-- `bun test` runs unit tests and real-server integration tests together. `bun run test` runs the same suites in separate processes.
+- `bun test` and `bun run test` run unit tests and real-server integration tests together.
 - `bun run test:unit` runs only unit tests, without Java or network access.
 - `bun run test:integration` requires Java 21+, `curl`, and `unzip`. On the first run it downloads the latest LanguageTool snapshot (roughly 263 MB) into ignored `resources/`, then starts a temporary local server and shuts it down after testing. Later runs reuse the cached download. Delete `resources/LanguageTool-latest-snapshot.zip` and `resources/languagetool-integration-server/` to fetch a newer snapshot.
 
