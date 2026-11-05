@@ -2,6 +2,7 @@ import {
     App,
     Command,
     Editor,
+    editorInfoField,
     MarkdownView,
     Menu,
     Notice,
@@ -9,6 +10,7 @@ import {
     PluginManifest,
     setIcon,
     setTooltip,
+    TFile,
 } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { ChangeSpec, StateEffect } from "@codemirror/state";
@@ -29,13 +31,15 @@ import {
     clearUnderlinesInRange,
     underlineDecoration,
 } from "./editor/underlines";
-import { lintClass, cmpIgnoreCase, isWord } from "./helpers";
+import { lintClass, cmpIgnoreCase, isWord, isAllowedDetectedLanguage, parseLanguageList } from "./helpers";
 import * as markdown from "./markdown/parser";
 import { RefreshableTask } from "./refreshableTask";
 
 export default class LanguageToolPlugin extends Plugin {
     public settings: LTSettings;
     private statusBarItem?: HTMLElement;
+    private ribbonIcon?: HTMLElement;
+    private ignoredMatches = new Set<string>();
 
     private isLoading = false;
 
@@ -96,6 +100,7 @@ export default class LanguageToolPlugin extends Plugin {
         this.statusBarItem.addClass("status-bar-item-icon", "lt-status-bar-btn");
         this.statusBarItem.onclick = () => this.handleStatusBarClick();
         this.setStatusBarReady();
+        this.updateRibbonIcon();
 
         // Editor functionality
         this.registerEditorExtension(underlineExtension(this));
@@ -128,6 +133,8 @@ export default class LanguageToolPlugin extends Plugin {
             "lt-language": "text",
             "lt-picky": "checkbox",
             "lt-autoCheck": "checkbox",
+            "lt-autocheck": "checkbox",
+            "lt-possibleLanguages": "multitext",
             "lt-dictionary": "multitext",
             "lt-disabledRules": "multitext",
             "lt-disabledCategories": "multitext",
@@ -177,6 +184,13 @@ export default class LanguageToolPlugin extends Plugin {
             },
         });
         this.addCommand({
+            id: "toggle-auto-check-document",
+            name: "Toggle automatic checking for current document",
+            editorCallback: async (_editor, view) => {
+                if (view.file) await this.toggleDocumentAutoCheck(view.file);
+            },
+        });
+        this.addCommand({
             id: "clear",
             name: "Clear suggestions",
             icon: "cross",
@@ -214,12 +228,12 @@ export default class LanguageToolPlugin extends Plugin {
             editorCheckCallback: (checking, editor) => {
                 // @ts-expect-error, not typed
                 const editorView = editor.cm as EditorView;
-                const cursorOffset = editor.posToOffset(editor.getCursor());
+                const cursorOffset = editorView.state.selection.main.to;
                 let firstMatch = null as { from: number; to: number } | null;
                 editorView.state
                     .field(underlineDecoration)
-                    .between(cursorOffset + 1, Infinity, (from, to) => {
-                        if (!firstMatch || firstMatch.from > from) {
+                    .between(cursorOffset, editorView.state.doc.length, (from, to) => {
+                        if (from >= cursorOffset && (!firstMatch || firstMatch.from > from)) {
                             firstMatch = { from, to };
                         }
                     });
@@ -229,8 +243,39 @@ export default class LanguageToolPlugin extends Plugin {
                 if (firstMatch != null) {
                     editorView.dispatch({
                         selection: { anchor: firstMatch.from, head: firstMatch.to },
+                        scrollIntoView: true,
                     });
                 }
+            },
+        });
+        this.addCommand({
+            id: "previous",
+            name: "Jump to previous suggestion",
+            icon: "chevron-left",
+            editorCheckCallback: (checking, editor) => {
+                // @ts-expect-error, not typed
+                const editorView = editor.cm as EditorView;
+                const cursorOffset = editorView.state.selection.main.from;
+                let lastMatch = null as api.LTRange | null;
+                editorView.state.field(underlineDecoration).between(0, cursorOffset, (from, to) => {
+                    if (to <= cursorOffset && (!lastMatch || lastMatch.from < from)) lastMatch = { from, to };
+                });
+                if (checking) return lastMatch !== null;
+                if (lastMatch) editorView.dispatch({
+                    selection: { anchor: lastMatch.from, head: lastMatch.to },
+                    scrollIntoView: true,
+                });
+            },
+        });
+        this.addCommand({
+            id: "ignore",
+            name: "Ignore current suggestion",
+            editorCheckCallback: (checking, editor) => {
+                const match = singleMatchAtCursor(editor, 0);
+                if (!match) return checking ? false : undefined;
+                if (checking) return true;
+                // @ts-expect-error, not typed
+                this.ignoreMatch(match, editor.cm as EditorView);
             },
         });
         for (let i = 1; i <= SUGGESTIONS; i++) {
@@ -256,12 +301,7 @@ export default class LanguageToolPlugin extends Plugin {
                 if (!isWord(match.text)) return checking ? false : undefined;
                 if (checking) return true;
 
-                editorView.dispatch({
-                    effects: [clearMatchingUnderlines.of(m => m.text == match.text)],
-                });
-
-                this.settings
-                    .update(current => ({ dictionary: [...current.dictionary, match.text.trim()] }))
+                this.addToDictionary(match.text, editorView)
                     .then(
                         () => {},
                         e => {
@@ -384,13 +424,7 @@ export default class LanguageToolPlugin extends Plugin {
                 subItem.setTitle("Add to dictionary");
                 subItem.setIcon("plus-with-circle");
                 subItem.onClick(async () => {
-                    await this.settings.update(current => ({
-                        dictionary: [...current.dictionary, match.text.trim()].sort(cmpIgnoreCase),
-                    }));
-                    await this.syncDictionary();
-                    editor.dispatch({
-                        effects: [clearMatchingUnderlines.of(m => m.text === match.text)],
-                    });
+                    await this.addToDictionary(match.text, editor);
                 });
             });
         }
@@ -400,7 +434,7 @@ export default class LanguageToolPlugin extends Plugin {
                 subItem.setTitle("Ignore suggestion");
                 subItem.setIcon("cross");
                 subItem.onClick(() => {
-                    editor.dispatch({ effects: [clearUnderlinesInRange.of(range)] });
+                    this.ignoreMatch(match, editor);
                 });
             });
 
@@ -530,6 +564,15 @@ export default class LanguageToolPlugin extends Plugin {
                 });
             })
             .addItem(item => {
+                const file = this.app.workspace.getActiveFile();
+                item.setTitle(this.getActiveFileSettings().shouldAutoCheck
+                    ? "Disable automatic checking for current document"
+                    : "Enable automatic checking for current document");
+                item.setIcon("file-text");
+                item.setDisabled(!file);
+                item.onClick(async () => { if (file) await this.toggleDocumentAutoCheck(file); });
+            })
+            .addItem(item => {
                 item.setTitle("Clear suggestions");
                 item.setIcon("cross");
                 item.onClick(() => {
@@ -547,24 +590,41 @@ export default class LanguageToolPlugin extends Plugin {
     /**
      * Get the settings for the current file, where values might be reconfigured in the frontmatter.
      */
-    public getActiveFileSettings(): LTOptions {
-        const file = this.app.workspace.getActiveFile();
+    private getEditorFile(editor?: EditorView): TFile | null {
+        return editor ? editor.state.field(editorInfoField, false)?.file ?? null
+            : this.app.workspace.getActiveFile();
+    }
+
+    public isFileIgnored(editor: EditorView): boolean {
+        const file = this.getEditorFile(editor);
+        const tags: unknown = file && this.app.metadataCache.getFileCache(file)?.frontmatter?.tags;
+        const values = typeof tags === "string" ? tags.split(",") : tags;
+        return Array.isArray(values) && values.some(tag =>
+            typeof tag === "string" && tag.trim().replace(/^#/, "") === "lt-ignore");
+    }
+
+    public getActiveFileSettings(editor?: EditorView): LTOptions {
+        const file = this.getEditorFile(editor);
         const cache = file && this.app.metadataCache.getFileCache(file);
 
         // /* eslint-disable @typescript-eslint/no-unsafe-assignment */
         if (cache?.frontmatter != null) {
-            const language: unknown =
-                cache.frontmatter["lt-language"] ?? cache.frontmatter["lt_language"];
+            const language = ["lt-language", "lt_language", "language", "lang"]
+                .map(key => cache.frontmatter?.[key] as unknown)
+                .find(value => typeof value === "string" && value.trim());
             const picky: unknown = cache.frontmatter["lt-picky"];
-            const autoCheck: unknown = cache.frontmatter["lt-autoCheck"];
+            const autoCheck: unknown = cache.frontmatter["lt-autocheck"] ?? cache.frontmatter["lt-autoCheck"];
+            const possibleLanguages = parseLanguageList(cache.frontmatter["lt-possibleLanguages"] ?? cache.frontmatter["lt_possibleLanguages"]);
             const dictionary: unknown = cache.frontmatter["lt-dictionary"];
             const disabledRules: unknown = cache.frontmatter["lt-disabledRules"];
             const disabledCategories: unknown = cache.frontmatter["lt-disabledCategories"];
 
             // Beware: shallow clone
             let settings = { ...this.settings.options };
-            if (typeof language === "string") settings.staticLanguage = language;
-            if (typeof autoCheck === "boolean") settings.shouldAutoCheck = autoCheck;
+            if (typeof language === "string") settings.staticLanguage = language.trim();
+            if (autoCheck === true || autoCheck === "true") settings.shouldAutoCheck = true;
+            if (autoCheck === false || autoCheck === "false") settings.shouldAutoCheck = false;
+            if (possibleLanguages) settings.possibleLanguages = possibleLanguages;
             if (typeof picky === "boolean") settings.pickyMode = picky;
             if (Array.isArray(dictionary) && dictionary.every(item => typeof item === "string"))
                 settings.dictionary = dictionary;
@@ -587,6 +647,72 @@ export default class LanguageToolPlugin extends Plugin {
         return this.settings.options;
     }
 
+    private async toggleDocumentAutoCheck(file: TFile): Promise<void> {
+        await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+            const value = frontmatter["lt-autocheck"] ?? frontmatter["lt-autoCheck"];
+            const current = value === true || value === "true" ? true
+                : value === false || value === "false" ? false : this.settings.options.shouldAutoCheck;
+            delete frontmatter["lt-autoCheck"];
+            if (!current === this.settings.options.shouldAutoCheck) delete frontmatter["lt-autocheck"];
+            else frontmatter["lt-autocheck"] = !current;
+        });
+    }
+
+    private updateRibbonIcon(): void {
+        if (!this.settings.options.showRibbonIcon) {
+            this.ribbonIcon?.remove();
+            this.ribbonIcon = undefined;
+        } else if (!this.ribbonIcon) {
+            this.ribbonIcon = this.addRibbonIcon("spell-check", "Check text", async () => {
+                const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+                if (!view || view.getMode() !== "source") return;
+                // @ts-expect-error, not typed
+                if (!await this.runDetection(view.editor.cm as EditorView)) new Notice("No suggestions found.");
+            });
+        }
+    }
+
+    public ignoreMatch(match: api.LTMatch, editor: EditorView): void {
+        this.ignoredMatches.add(JSON.stringify([match.ruleId, match.text]));
+        editor.dispatch({ effects: clearMatchingUnderlines.of(m =>
+            m.ruleId === match.ruleId && m.text === match.text) });
+    }
+
+    private getObsidianDictionary(): string[] {
+        // Obsidian exposes its spellcheck dictionary only through the internal vault config.
+        const vault = this.app.vault as typeof this.app.vault & { getConfig?: (key: string) => unknown };
+        const words = vault?.getConfig?.("spellcheckDictionary");
+        return Array.isArray(words) ? words.filter((word): word is string => typeof word === "string") : [];
+    }
+
+    public async addToDictionary(text: string, editor: EditorView): Promise<void> {
+        const word = text.trim();
+        const originalDoc = editor.state.doc;
+        const removed: api.LTLint[] = [];
+        editor.state.field(underlineDecoration).between(0, originalDoc.length, (from, to, decoration) => {
+            const match = (decoration.spec as { underline: api.LTLint }).underline;
+            if (match.text.trim() === word) removed.push({ ...match, range: { from, to } });
+        });
+        const alreadyLocal = this.settings.options.dictionary.includes(word);
+        const alreadyObsidian = this.getObsidianDictionary().includes(word);
+        await this.settings.update(current => ({ dictionary: [...new Set([...current.dictionary, word])].sort(cmpIgnoreCase) }));
+        const vault = this.app.vault as typeof this.app.vault & { setConfig: (key: string, value: string[]) => void };
+        vault.setConfig("spellcheckDictionary", [...new Set([...this.getObsidianDictionary(), word])]);
+        editor.dispatch({ effects: clearMatchingUnderlines.of(m => m.text.trim() === word) });
+        const fragment = createFragment(frag => {
+            frag.appendText(`Added "${word}" to dictionary. `);
+            frag.createEl("button", { text: "Undo" }, button => {
+                button.onclick = async () => {
+                    if (!alreadyLocal) await this.settings.update(current => ({ dictionary: current.dictionary.filter(entry => entry !== word) }));
+                    if (!alreadyObsidian) vault.setConfig("spellcheckDictionary", this.getObsidianDictionary().filter(entry => entry !== word));
+                    if (editor.state.doc === originalDoc) editor.dispatch({ effects: removed.map(match => addUnderline.of(match)) });
+                    notice.hide();
+                };
+            });
+        });
+        const notice = new Notice(fragment, 10000);
+    }
+
     /**
      * Check the current document, adding underlines.
      */
@@ -595,7 +721,9 @@ export default class LanguageToolPlugin extends Plugin {
         auto: boolean = false,
         range?: api.LTRange,
     ): Promise<boolean> {
-        let settings = this.getActiveFileSettings();
+        if (this.isFileIgnored(editor)) return true;
+        let settings = this.getActiveFileSettings(editor);
+        if (auto && !settings.shouldAutoCheck) return true;
 
         const selection = editor.state.selection.main;
         if (!range && !selection.empty) range = { ...selection };
@@ -624,7 +752,9 @@ export default class LanguageToolPlugin extends Plugin {
             console.debug(`Checking ${annotations.length()} characters...`);
             // console.debug("Text", JSON.stringify(annotations, undefined, "  "));
 
-            matches = await api.check(settings, this.settings.getApiKey(), offset, annotations);
+            const result = await api.check(settings, this.settings.getApiKey(), offset, annotations);
+            matches = isAllowedDetectedLanguage(result.detectedLanguage, settings.possibleLanguages, settings.staticLanguage)
+                ? result.matches : [];
             // update range to the checked text
             if (range) range = { from: offset, to: offset + annotations.length() };
         } catch (e) {
@@ -642,7 +772,7 @@ export default class LanguageToolPlugin extends Plugin {
 
         // Avoid updating the underlines if the document has changed
         // As the codemirror state is immutable, we can directly compare the text objects
-        if (currentDoc !== editor.state.doc) return true;
+        if (currentDoc !== editor.state.doc || this.isFileIgnored(editor)) return true;
 
         const effects: StateEffect<null | api.LTLint | api.LTRange>[] = [];
 
@@ -654,9 +784,10 @@ export default class LanguageToolPlugin extends Plugin {
         }
 
         if (matches) {
-            const spellcheckDictionary = settings.dictionary;
+            const spellcheckDictionary = [...settings.dictionary, ...this.getObsidianDictionary()];
 
             for (const match of matches) {
+                if (this.ignoredMatches.has(JSON.stringify([match.ruleId, match.text]))) continue;
                 // Fixes a bug where the match is outside the document
                 if (match.range.to > editor.state.doc.length) continue;
                 // Ignore typos that are in the spellcheck dictionary
@@ -719,6 +850,7 @@ export default class LanguageToolPlugin extends Plugin {
         source: SettingsUpdateSource = "local",
     ): void {
         const current = this.settings.options;
+        if (previous.showRibbonIcon !== current.showRibbonIcon) this.updateRibbonIcon();
         if (previous.serverUrl !== current.serverUrl) {
             this.languageTask.invalidate();
             this.settingTab.setLanguages([]);

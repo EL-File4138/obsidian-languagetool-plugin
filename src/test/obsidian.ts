@@ -1,4 +1,5 @@
 import { mock } from "bun:test";
+import { StateField } from "@codemirror/state";
 import type { App, PluginManifest, RequestUrlParam, RequestUrlResponse } from "obsidian";
 
 export const pluginStorage = {
@@ -12,6 +13,7 @@ export const pluginStorage = {
 
 // Keep module identity shared across suites; customize behavior with scoped spies.
 mock.module("obsidian", () => ({
+    editorInfoField: StateField.define({ create: () => ({}), update: value => value }),
     Plugin: class {
         constructor(public app: App, public manifest: PluginManifest) {}
         async saveData(data: unknown): Promise<void> {
@@ -27,7 +29,7 @@ mock.module("obsidian", () => ({
         refreshDomState() {}
     },
     Modal: class {},
-    Notice: class {},
+    Notice: class { hide() {} },
     SecretComponent: class {},
     Setting: class {},
     ButtonComponent: class {},

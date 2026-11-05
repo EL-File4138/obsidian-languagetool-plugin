@@ -190,7 +190,7 @@ afterAll(async () => {
 async function runCheck(text: string, overrides: Partial<LTOptions> = {}) {
     const options = { ...DEFAULT_SETTINGS, serverUrl, preferredLanguages: [], ...overrides };
     try {
-        return await check(options, null, 0, new AnnotatedText([{ text }]));
+        return (await check(options, null, 0, new AnnotatedText([{ text }]))).matches;
     } catch (error) {
         throw new Error(`${String(error)}\nLanguageTool logs:\n${logs}`, { cause: error });
     }
@@ -263,6 +263,21 @@ describe("real LanguageTool /v2/check", () => {
         });
         expect(lastRequest.get("language")).toBe("en-US");
         expect(lastRequest.has("preferredLanguages")).toBe(false);
+        expect(lastRequest.has("preferredVariants")).toBe(false);
         expect(lastResponse.language.code).toBe("en-US");
+    });
+
+    integrationTest("NFC offsets remain physical offsets around excluded decomposed markup", async () => {
+        const annotations = new AnnotatedText([
+            { text: "I visited a cafe\u0301. " },
+            { markup: "[e\u0301](url)", interpretAs: " " },
+            { text: "This is a obvious mistake." },
+        ]);
+        const original = annotations.annotations.map(a => "text" in a ? a.text : a.markup).join("");
+        const result = await check({ ...DEFAULT_SETTINGS, serverUrl, staticLanguage: "en-US" }, null, 0, annotations);
+        const article = result.matches.find(match => match.range.from === original.indexOf("a obvious"));
+        expect(article).toBeDefined();
+        expect(original.slice(article!.range.from, article!.range.to)).toBe(article!.text);
+        expect(lastRequest.get("data")).toContain("café");
     });
 });

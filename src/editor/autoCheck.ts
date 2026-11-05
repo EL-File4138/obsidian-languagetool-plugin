@@ -1,42 +1,46 @@
 import { Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { ViewPlugin, ViewUpdate } from "@codemirror/view";
 import LanguageToolPlugin from "../main";
 import { Notice } from "obsidian";
 
 export function autoCheckListener(plugin: LanguageToolPlugin): Extension {
-    let debounceTimer = -1;
-    let range = { from: Infinity, to: -Infinity };
+    return ViewPlugin.fromClass(class {
+        private debounceTimer = -1;
+        private range = { from: Infinity, to: -Infinity };
 
-    return EditorView.updateListener.of(update => {
-        let settings = plugin.getActiveFileSettings();
-        if (!update.docChanged || !settings.shouldAutoCheck) return;
-
-        // Currently we have the issue that underlines sometimes do not move correctly
-        // One problem might be that an update comes in between starting and applying a check
-
-        update.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
-            range.from = Math.min(range.from, fromB, toB);
-            range.to = Math.max(range.to, fromB, toB);
-        });
-
-        const view = update.view;
-        window.clearTimeout(debounceTimer);
-        debounceTimer = window.setTimeout(() => {
-            const selection = range;
-            range = { from: Infinity, to: -Infinity };
-
-            plugin.runDetection(view, true, selection).then(
-                () => {},
-                e => {
-                    const error = e as Error;
+        update(update: ViewUpdate) {
+            if (!update.docChanged) return;
+            const settings = plugin.getActiveFileSettings(update.view);
+            if (!settings.shouldAutoCheck || plugin.isFileIgnored(update.view)) {
+                this.destroy();
+                return;
+            }
+            // Each pane owns its pending range; earlier edits move with subsequent changes.
+            if (Number.isFinite(this.range.from)) {
+                this.range.from = update.changes.mapPos(this.range.from, -1);
+                this.range.to = update.changes.mapPos(this.range.to, 1);
+            }
+            update.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+                this.range.from = Math.min(this.range.from, fromB);
+                this.range.to = Math.max(this.range.to, toB);
+            });
+            window.clearTimeout(this.debounceTimer);
+            this.debounceTimer = window.setTimeout(() => {
+                const selection = this.range;
+                this.range = { from: Infinity, to: -Infinity };
+                void plugin.runDetection(update.view, true, selection).catch((error: unknown) => {
                     if (Date.now() > plugin.autoCheckSuppressErrorsUntil) {
-                        // Prevent spamming errors
-                        plugin.autoCheckSuppressErrorsUntil = Date.now() + 15 * 60_000; // 15 minutes
-                        new Notice("Auto-check failed:\n" + error.message, 10000);
+                        plugin.autoCheckSuppressErrorsUntil = Date.now() + 15 * 60_000;
+                        new Notice("Auto-check failed:\n" + (error instanceof Error ? error.message : String(error)), 10000);
                     }
-                    console.error("Auto-check failed", e);
-                },
-            );
-        }, plugin.settings.options.autoCheckDelay);
+                    console.error("Auto-check failed", error);
+                });
+            }, settings.autoCheckDelay);
+        }
+
+        destroy() {
+            window.clearTimeout(this.debounceTimer);
+            this.range = { from: Infinity, to: -Infinity };
+        }
     });
 }

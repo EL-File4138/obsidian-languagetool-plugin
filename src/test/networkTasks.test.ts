@@ -90,7 +90,7 @@ test.each([
             message: "",
             replacements: [],
         };
-        spyOn(api, "check").mockResolvedValue([match]);
+        spyOn(api, "check").mockResolvedValue({ matches: [match] });
         spyOn(plugin, "getActiveFileSettings").mockImplementation(() => plugin.settings.options);
         let underlines = 0;
         const editor = {

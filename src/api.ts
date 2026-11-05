@@ -2,7 +2,7 @@ import { endpointFromUrl, LTOptions } from "./settings";
 import { RequestUrlParam, RequestUrlResponse, requestUrl } from "obsidian";
 import { JSONPath } from "jsonpath-plus";
 import { AnnotatedText } from "./annotated";
-import { errorMessage } from "./helpers";
+import { buildNfcOffsetMap, errorMessage, normalizeServerUrl } from "./helpers";
 
 /** LanguageTool Check API: https://languagetool.org/http-api/swagger-ui */
 
@@ -25,6 +25,11 @@ export interface LTLint extends LTMatch {
     range: LTRange;
 }
 
+export interface LTCheckResult {
+    matches: LTLint[];
+    detectedLanguage?: string;
+}
+
 type JsonValue = string | number | boolean | { [x: string]: JsonValue } | JsonValue[] | null;
 
 /**
@@ -35,8 +40,25 @@ export async function check(
     apiKey: string | null,
     offset: number,
     annotated: AnnotatedText,
-): Promise<LTLint[]> {
-    const data = annotated.stringify();
+): Promise<LTCheckResult> {
+    // Normalize only checked text, not excluded markup (URLs, code, frontmatter).
+    // LanguageTool offsets still count the full physical length of that markup.
+    const offsetMap: number[] = [];
+    let originalOffset = 0;
+    let requestOffset = 0;
+    const requestText = new AnnotatedText(annotated.annotations.map(annotation => {
+        const content = "text" in annotation ? annotation.text : annotation.markup;
+        const localMap = "text" in annotation ? buildNfcOffsetMap(content) : null;
+        const normalized = localMap ? content.normalize("NFC") : content;
+        if (localMap || originalOffset !== requestOffset) {
+            for (let i = 0; i <= normalized.length; i++)
+                offsetMap[requestOffset + i] = originalOffset + (localMap?.[i] ?? i);
+        }
+        originalOffset += content.length;
+        requestOffset += normalized.length;
+        return "text" in annotation ? { text: normalized } : annotation;
+    }));
+    const data = requestText.stringify();
 
     const lang = options.staticLanguage || "auto";
     const params: { [key: string]: string } = {
@@ -69,7 +91,7 @@ export async function check(
     }
 
     const res = await requestUrlChecked({
-        url: `${options.serverUrl}/v2/check`,
+        url: `${normalizeServerUrl(options.serverUrl)}/v2/check`,
         method: "POST",
         body: new URLSearchParams(params).toString(),
         headers: {
@@ -81,19 +103,27 @@ export async function check(
     if (res.json == null) throw new Error(`Error processing response from LanguageTool.`);
 
     const matches = jsonPathA<JsonValue>("$.matches[*]", res.json as JsonValue);
-    return matches.map(match => {
-        const from = jsonPath<number>("$.offset@number()", match);
-        const to = from + jsonPath<number>("$.length@number()", match);
-        return {
-            range: { from: offset + from, to: offset + to },
-            text: annotated.extractSlice(from, to) || "",
-            title: jsonPath<string>("$.shortMessage@string()", match),
-            message: jsonPath<string>("$.message@string()", match),
-            replacements: jsonPathA<string>("$.replacements[*].value@string()", match),
-            categoryId: jsonPath<string>("$.rule.category.id@string()", match),
-            ruleId: jsonPath<string>("$.rule.id@string()", match),
-        };
-    });
+    return {
+        detectedLanguage:
+            jsonPathA<string>("$.language.detectedLanguage.code@string()", res.json as JsonValue)[0] ||
+            jsonPathA<string>("$.language.code@string()", res.json as JsonValue)[0] ||
+            jsonPathA<string>("$.detectedLanguages[0].code@string()", res.json as JsonValue)[0],
+        matches: matches.map(match => {
+            const start = jsonPath<number>("$.offset@number()", match);
+            const end = start + jsonPath<number>("$.length@number()", match);
+            const from = offsetMap[start] ?? start;
+            const to = offsetMap[end] ?? end;
+            return {
+                range: { from: offset + from, to: offset + to },
+                text: annotated.extractSlice(from, to) || "",
+                title: jsonPath<string>("$.shortMessage@string()", match),
+                message: jsonPath<string>("$.message@string()", match),
+                replacements: jsonPathA<string>("$.replacements[*].value@string()", match),
+                categoryId: jsonPath<string>("$.rule.category.id@string()", match),
+                ruleId: jsonPath<string>("$.rule.id@string()", match),
+            };
+        }),
+    };
 }
 
 export interface Language {
@@ -106,7 +136,7 @@ export interface Language {
 const LANG_TIMEOUT = 3000;
 
 export async function languages(serverUrl: string): Promise<Language[]> {
-    let res = await requestUrlChecked({ url: `${serverUrl}/v2/languages` }, LANG_TIMEOUT);
+    let res = await requestUrlChecked({ url: `${normalizeServerUrl(serverUrl)}/v2/languages` }, LANG_TIMEOUT);
     let languages = res.json as JsonValue;
     if (languages == null || !(languages instanceof Array))
         throw new Error(`Error processing response from LanguageTool.`);
@@ -127,7 +157,7 @@ export async function words(
         for (let offset = 0; ; offset += limit) {
             const res = (
                 await requestUrlChecked({
-                    url: sUrl(`${options.serverUrl}/v2/words`, {
+                    url: sUrl(`${normalizeServerUrl(options.serverUrl)}/v2/words`, {
                         username: options.username,
                         apiKey: apiKey,
                         offset: String(offset),
@@ -155,7 +185,7 @@ export async function wordsAdd(
         const res = (
             await requestUrlChecked(
                 {
-                    url: sUrl(`${options.serverUrl}/v2/words/add`, {
+                    url: sUrl(`${normalizeServerUrl(options.serverUrl)}/v2/words/add`, {
                         username: options.username,
                         apiKey: apiKey,
                         word,
@@ -182,7 +212,7 @@ export async function wordsDel(
         const res = (
             await requestUrlChecked(
                 {
-                    url: sUrl(`${options.serverUrl}/v2/words/delete`, {
+                    url: sUrl(`${normalizeServerUrl(options.serverUrl)}/v2/words/delete`, {
                         username: options.username,
                         apiKey: apiKey,
                         word,

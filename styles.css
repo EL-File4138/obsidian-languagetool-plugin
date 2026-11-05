@@ -52,3 +52,7 @@
         transform: rotate(360deg);
     }
 }
+.cm-tooltip-hover:has(.lt-glass) {
+    background-color: color-mix(in srgb, var(--background-secondary) 75%, transparent);
+    backdrop-filter: blur(10px);
+}

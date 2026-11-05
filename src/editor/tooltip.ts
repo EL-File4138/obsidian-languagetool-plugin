@@ -1,5 +1,5 @@
-import { EditorView, Tooltip, hoverTooltip } from "@codemirror/view";
-import { Extension } from "@codemirror/state";
+import { EditorView, Tooltip, hoverTooltip, closeHoverTooltips, hasHoverTooltips, keymap } from "@codemirror/view";
+import { Extension, Prec } from "@codemirror/state";
 import { lintClass } from "../helpers";
 import { ButtonComponent, setIcon } from "obsidian";
 import { default as LanguageToolPlugin } from "../main";
@@ -18,7 +18,20 @@ function createTooltip(
     const ruleId = match.ruleId;
     const categoryClass = lintClass(category, ruleId);
 
-    return createDiv({ cls: ["lt-tooltip", categoryClass] }, root => {
+    return createDiv({ cls: ["lt-tooltip", categoryClass, ...(plugin.settings.options.glassBg ? ["lt-glass"] : [])] }, root => {
+        // Prevent callout/editor handlers from reclaiming focus from tooltip controls.
+        root.onmousedown = event => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        root.onkeydown = event => {
+            if (event.key === "Escape") {
+                view.dispatch({ effects: closeHoverTooltips });
+                view.focus();
+                event.stopPropagation();
+                event.preventDefault();
+            }
+        };
         if (match.title) root.createSpan({ cls: "lt-title", text: match.title });
         if (match.message) root.createSpan({ cls: "lt-message", text: match.message });
 
@@ -43,22 +56,18 @@ function createTooltip(
                     setIcon(button.createSpan(), "plus-with-circle");
                     button.createSpan({ text: "Add to dictionary" });
                     button.onclick = async () => {
-                        // Add to global dictionary
-                        let dictionary = new Set(plugin.settings.options.dictionary);
-                        dictionary.add(match.text.trim());
-                        await plugin.settings.update({ dictionary: [...dictionary].sort() });
-                        // Remove other underlines with the same word
-                        view.dispatch({
-                            effects: [clearMatchingUnderlines.of(m => m.text === match.text)],
-                        });
+                        await plugin.addToDictionary(match.text, view);
+                        view.dispatch({ effects: closeHoverTooltips });
                     };
                 });
             } else {
                 container.createDiv({ cls: "lt-ignore-btn" }, button => {
                     setIcon(button.createSpan(), "cross");
                     button.createSpan({ text: "Ignore" });
-                    button.onclick = () =>
-                        view.dispatch({ effects: [clearUnderlinesInRange.of(range)] });
+                    button.onclick = () => {
+                        plugin.ignoreMatch(match, view);
+                        view.dispatch({ effects: closeHoverTooltips });
+                    };
                 });
                 if (category !== "SYNONYMS") {
                     container.createDiv({ cls: "lt-ignore-btn" }, button => {
@@ -75,6 +84,7 @@ function createTooltip(
                             view.dispatch({
                                 effects: [
                                     clearMatchingUnderlines.of(match => match.ruleId === ruleId),
+                                    closeHoverTooltips,
                                 ],
                             });
                         };
@@ -115,6 +125,8 @@ function lintTooltip(
 
     let cursor = underlines.iter(pos);
     if (cursor.value != null && cursor.from <= pos && cursor.to >= pos) {
+        const selection = state.selection.main;
+        if (!selection.empty && (selection.from !== cursor.from || selection.to !== cursor.to)) return null;
         let match = (cursor.value.spec as { underline: api.LTLint }).underline;
         return {
             pos: cursor.from,
@@ -130,7 +142,14 @@ function lintTooltip(
 }
 
 export function buildHoverTooltip(plugin: LanguageToolPlugin): Extension {
-    return hoverTooltip(lintTooltip.bind(null, plugin), { hideOnChange: true });
+    return [
+        hoverTooltip(lintTooltip.bind(null, plugin), { hideOnChange: true }),
+        Prec.highest(keymap.of([{ key: "Escape", run: view => {
+            if (!hasHoverTooltips(view.state)) return false;
+            view.dispatch({ effects: closeHoverTooltips });
+            return true;
+        } }])),
+    ];
 }
 
 export const baseTheme = EditorView.baseTheme({

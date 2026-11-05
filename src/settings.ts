@@ -11,7 +11,7 @@ import {
 
 import LanguageToolPlugin from "./main";
 import * as api from "./api";
-import { cmpIgnoreCase } from "./helpers";
+import { cmpIgnoreCase, normalizeServerUrl, parseLanguageList } from "./helpers";
 
 export const SUGGESTIONS = 8;
 const DEFAULT_SECRET_APIKEY = "languagetool-apikey";
@@ -109,11 +109,12 @@ export class Endpoint {
 const endpoints = {
     public: new Endpoint("https://api.languagetool.org", 20, 20000),
     premium: new Endpoint("https://api.languagetoolplus.com", 80, 75000),
-    custom: new Endpoint("", 120, 1000000),
+    custom: new Endpoint("", 1200, 1000000),
 };
 export type EndpointType = keyof typeof endpoints;
 
 export function endpointFromUrl(url: string): EndpointType {
+    url = normalizeServerUrl(url);
     for (const [key, value] of Object.entries(endpoints)) {
         if (value.url === url) return key as EndpointType;
     }
@@ -187,7 +188,12 @@ export class LTSettings {
             newOptions.serverUrl = endpoints[newOptions.endpoint].url;
         }
 
+        if (newOptions.serverUrl != null) newOptions.serverUrl = normalizeServerUrl(newOptions.serverUrl);
+        if (newOptions.possibleLanguages != null)
+            newOptions.possibleLanguages = parseLanguageList(newOptions.possibleLanguages) ?? [];
+
         let updatedOptions = { ...this._options, ...newOptions };
+        updatedOptions.autoCheckDelay = Math.max(getEndpoint(updatedOptions.serverUrl).minDelay, updatedOptions.autoCheckDelay);
         if (
             updatedOptions.serverUrl !== this._options.serverUrl ||
             updatedOptions.username !== this._options.username
@@ -258,6 +264,8 @@ export class LTSettings {
         let data = ((await this.tab.plugin.loadData()) ?? {}) as Record<string, unknown>;
 
         let snapshot = JSON.stringify(data);
+        if (typeof data.serverUrl === "string") data.serverUrl = normalizeServerUrl(data.serverUrl);
+        data.possibleLanguages = parseLanguageList(data.possibleLanguages) ?? [];
 
         // Migration: endpoint
         if (!("endpoint" in data)) {
@@ -315,6 +323,10 @@ export class LTSettings {
         if (!data.syncDictionary) data.pendingDictEdits = [];
         delete data.remoteDictionary;
 
+        const serverUrl = typeof data.serverUrl === "string" ? data.serverUrl : DEFAULT_SETTINGS.serverUrl;
+        data.autoCheckDelay = Math.max(getEndpoint(serverUrl).minDelay,
+            typeof data.autoCheckDelay === "number" ? data.autoCheckDelay : DEFAULT_SETTINGS.autoCheckDelay);
+
         // Save if options were migrated
         if (snapshot !== JSON.stringify(data)) {
             await this.tab.plugin.saveData({ ...DEFAULT_SETTINGS, ...data });
@@ -350,6 +362,7 @@ export interface LTOptions {
     motherTongue: string;
     staticLanguage: string;
     preferredLanguages: string[];
+    possibleLanguages: string[];
     languageVariety: Record<string, string>;
 
     dictionary: string[];
@@ -365,6 +378,8 @@ export interface LTOptions {
 
     longCheckNotification: boolean;
     injectProperties: boolean;
+    showRibbonIcon: boolean;
+    glassBg: boolean;
 }
 
 export const DEFAULT_SETTINGS: LTOptions = {
@@ -377,6 +392,7 @@ export const DEFAULT_SETTINGS: LTOptions = {
     motherTongue: "",
     staticLanguage: "",
     preferredLanguages: [],
+    possibleLanguages: [],
     languageVariety: Object.fromEntries(
         LANGUAGE_VARIETIES.map(v => [v.code, Object.keys(v.variants)[0]]),
     ),
@@ -390,6 +406,8 @@ export const DEFAULT_SETTINGS: LTOptions = {
     disabledRules: [],
     longCheckNotification: true,
     injectProperties: true,
+    showRibbonIcon: false,
+    glassBg: false,
 };
 
 class InputModal extends Modal {
@@ -444,6 +462,7 @@ export class LTSettingsTab extends PluginSettingTab {
     }
 
     getControlValue(key: string): unknown {
+        if (key === "possibleLanguages") return this.plugin.settings.options.possibleLanguages.join(", ");
         if (key.startsWith("preferredLanguages.")) {
             return this.plugin.settings.options.preferredLanguages.includes(key.split(".")[1]);
         }
@@ -458,7 +477,9 @@ export class LTSettingsTab extends PluginSettingTab {
     }
 
     async setControlValue(key: string, value: unknown): Promise<void> {
-        if (key.startsWith("preferredLanguages.")) {
+        if (key === "possibleLanguages") {
+            await this.plugin.settings.update({ possibleLanguages: parseLanguageList(value) ?? [] });
+        } else if (key.startsWith("preferredLanguages.")) {
             const language = key.split(".")[1];
             await this.plugin.settings.update(current => ({
                 preferredLanguages: value
@@ -611,12 +632,14 @@ export class LTSettingsTab extends PluginSettingTab {
                 control: {
                     type: "slider",
                     key: "autoCheckDelay",
-                    min: 500,
+                    min: getEndpoint(settings.options.serverUrl).minDelay,
                     max: 5000,
-                    step: 250,
+                    step: 50,
                     disabled: () => !settings.options.shouldAutoCheck,
                 },
             },
+            { name: "Ribbon icon", control: { type: "toggle", key: "showRibbonIcon" } },
+            { name: "Glass background", control: { type: "toggle", key: "glassBg" } },
             {
                 name: "Find synonyms",
                 desc: createFragment(frag => {
@@ -666,6 +689,11 @@ export class LTSettingsTab extends PluginSettingTab {
                                 ]) as Record<string, string>;
                             })(),
                         },
+                    },
+                    {
+                        name: "Allowed detected languages",
+                        desc: "Only show suggestions for these detected language codes (comma-separated). Empty allows all languages; a static language bypasses this filter.",
+                        control: { type: "text", key: "possibleLanguages", placeholder: "en, de" },
                     },
                     {
                         type: "page",
