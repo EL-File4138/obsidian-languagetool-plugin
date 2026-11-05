@@ -29,11 +29,7 @@ After installing and enabling the plugin, you can set up hotkeys (under Settings
 - **"Clear Suggestions"** clears the document or selected text of all red underlines from words or passages that were not corrected or changed.
 - **"Toggle Automatic Checking"** toggles ON/OFF the automatic spellchecking function as you write or change the document's contents.
 
-**LanguageTool tries to auto-detect the language used.** Selecting a specific language (under `Settings / LanguageTool / Static language`) usually is not necessary. If you want auto-detection to stay within a known set of languages, use `Settings / LanguageTool / Possible languages` and only suggestions in those languages will be kept. This feature enables the user to spellcheck in different languages within the same document (e.g., a dissertation written in English with quotes in a foreign language), which is ordinarily not possible with the built-in spellcheck function of Obsidian.
-
-## Ignoring Files
-
-Add the tag `lt-ignore` to the frontmatter of a file to ignore it from being spellchecked. All spellchecks, even manual ones, will be ignored.
+**LanguageTool tries to auto-detect the language used.** Selecting a specific language (under `Settings / LanguageTool / Static language`) usually is not necessary. This feature enables the user to spellcheck in different languages within the same document (e.g., a dissertation written in English with quotes in a foreign language), which is ordinarily not possible with the built-in spellcheck function of Obsidian.
 
 **Custom Spellchecker Dictionary:** You can add words to this dictionary directly from the editor and remove them again in the Obsidian settings (`Settings / LanguageTool / Spellcheck Dictionary`).
 
@@ -46,9 +42,6 @@ The following settings can be in the note's properties:
 ```md
 ---
 lt-language: en-US     // text: language code or "auto"
-lt-possibleLanguages: // multitext: Allowed auto-detected languages
-  - en-US
-  - de-DE
 lt-picky: true         // boolean: Provide more style suggestions
 lt-autoCheck: true     // boolean: Check as you type
 lt-dictionary:         // multitext: Ingored word
@@ -73,6 +66,16 @@ You (obviously) need a premium account and an API key to use the premium feature
 You can generate your API key at <https://languagetool.org/editor/settings/access-tokens>
 
 Configure your email, API key, and the new URL (https://api.languagetoolplus.com) in the plugin settings
+
+## Preferred languages
+
+Under **Language → Preferred languages**, select multiple languages to favor during automatic detection. These are hints, not a restriction: other languages may still be detected. Static language selection takes precedence; regional spelling remains controlled by **Language varieties**. Detection bias depends on the server's language-detection setup (for example, fastText).
+
+## Tests
+
+- `bun test` runs unit tests and real-server integration tests together. `bun run test` runs the same suites in separate processes.
+- `bun run test:unit` runs only unit tests, without Java or network access.
+- `bun run test:integration` requires Java 21+, `curl`, and `unzip`. On the first run it downloads the latest LanguageTool snapshot (roughly 263 MB) into ignored `resources/`, then starts a temporary local server and shuts it down after testing. Later runs reuse the cached download. Delete `resources/LanguageTool-latest-snapshot.zip` and `resources/languagetool-integration-server/` to fetch a newer snapshot.
 
 ## Manually Installing the Plugin
 

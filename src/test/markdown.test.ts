@@ -77,6 +77,16 @@ describe("markdown parsing", () => {
     });
 });
 
+test("excludes math", () => {
+    const input = "Some math $x_i$ after.\n\n$$\n\\frac{a}{b}\n$$\n\nEnd.";
+    const { annotations } = new SyntaxTree(input).annotate();
+
+    expect(annotations.length()).toBe(input.length);
+    expect(
+        annotations.annotations.flatMap(a => ("text" in a ? [a.text] : [])).join(""),
+    ).toBe("Some math  after.End.");
+});
+
 describe("markdown samples", () => {
     // iterate over all files in the samples directory
     const files = readdirSync("test");
@@ -88,4 +98,14 @@ describe("markdown samples", () => {
             expect(annotations.length()).toBe(input.trimEnd().length);
         });
     }
+});
+
+test("annotates only the selected block", () => {
+    const input = "first\n\na typo";
+    const syntax = new SyntaxTree(input);
+    const result = syntax.annotate({ from: 7, to: 12 });
+
+    expect(result.offset).toBe(7);
+    expect(result.annotations.annotations.length).toBeGreaterThanOrEqual(1);
+    expect(result.annotations.annotations[0]).toStrictEqual({ text: "a typo" });
 });

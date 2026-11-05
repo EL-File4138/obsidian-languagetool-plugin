@@ -1,8 +1,26 @@
-import { Command, Editor, MarkdownView, Menu, Notice, Plugin, setIcon, setTooltip } from "obsidian";
-import { Decoration, EditorView } from "@codemirror/view";
+import {
+    App,
+    Command,
+    Editor,
+    MarkdownView,
+    Menu,
+    Notice,
+    Plugin,
+    PluginManifest,
+    setIcon,
+    setTooltip,
+} from "obsidian";
+import { EditorView } from "@codemirror/view";
 import { ChangeSpec, StateEffect } from "@codemirror/state";
-import { endpointFromUrl, LTOptions, LTSettings, LTSettingsTab, SUGGESTIONS } from "./settings";
-import * as api from "api";
+import {
+    endpointFromUrl,
+    LTOptions,
+    LTSettings,
+    LTSettingsTab,
+    SettingsUpdateSource,
+    SUGGESTIONS,
+} from "./settings";
+import * as api from "./api";
 import { underlineExtension } from "./editor/extension";
 import {
     addUnderline,
@@ -11,41 +29,66 @@ import {
     clearUnderlinesInRange,
     underlineDecoration,
 } from "./editor/underlines";
-import { cmpIgnoreCase, setDifference, setIntersect, setUnion } from "./helpers";
+import { lintClass, cmpIgnoreCase, isWord } from "./helpers";
 import * as markdown from "./markdown/parser";
-
-class LTPluginSettings extends LTSettings {
-    private plugin: Plugin;
-    constructor(plugin: Plugin) {
-        super();
-        this.plugin = plugin;
-    }
-    protected loadOptions(): Promise<LTOptions> {
-        return this.plugin.loadData();
-    }
-    protected save(options: LTOptions): Promise<void> {
-        console.debug("Saving settings", options);
-        return this.plugin.saveData(options);
-    }
-}
+import { RefreshableTask } from "./refreshableTask";
 
 export default class LanguageToolPlugin extends Plugin {
-    public settings: LTPluginSettings = new LTPluginSettings(this);
-    private statusBarItem: HTMLElement;
+    public settings: LTSettings;
+    private statusBarItem?: HTMLElement;
 
     private isLoading = false;
 
     public logs: string[] = [];
     private settingTab: LTSettingsTab;
+    private readonly languageTask: RefreshableTask;
+    private readonly dictionaryTask: RefreshableTask;
+    // Cached api key for dictionary tasks.
+    private dictionaryApiKey?: string | null;
 
     // Used to temporarily disable auto-checking errors
     public autoCheckSuppressErrorsUntil: number = 0;
 
+    constructor(app: App, manifest: PluginManifest) {
+        super(app, manifest);
+
+        this.settingTab = new LTSettingsTab(this.app, this);
+        this.settings = new LTSettings(this.settingTab);
+        this.languageTask = new RefreshableTask(
+            async isCurrent => {
+                const serverUrl = this.settings.options.serverUrl;
+                const languages = await api.languages(serverUrl);
+                if (isCurrent()) this.settingTab.setLanguages(languages);
+            },
+            {
+                shouldRetry: api.isRetryableError,
+                onError: error => console.error("Failed to load languages", error),
+            },
+        );
+        this.dictionaryTask = new RefreshableTask(
+            isCurrent => this.reconcileDictionary(isCurrent),
+            {
+                shouldRetry: api.isRetryableError,
+                onError: error => {
+                    this.pushLogs(error as Error);
+                    console.error("Failed to sync dictionary with LanguageTool", error);
+                },
+            },
+        );
+    }
+
     public async onload(): Promise<void> {
         // Settings
         await this.settings.load();
-
-        this.settingTab = new LTSettingsTab(this.app, this);
+        this.registerDomEvent(window, "online", () => {
+            this.ensureNetworkTasks();
+            this.languageTask.retry();
+            this.dictionaryTask.retry();
+        });
+        this.register(() => {
+            this.languageTask.dispose();
+            this.dictionaryTask.dispose();
+        });
         this.addSettingTab(this.settingTab);
 
         // Status bar
@@ -66,13 +109,12 @@ export default class LanguageToolPlugin extends Plugin {
         if (this.settings.options.injectProperties) this.injectProperties(true);
 
         // Spellcheck Dictionary
-        const dictionary: Set<string> = new Set(
-            this.settings.options.dictionary.map(w => w.trim()),
-        );
-        dictionary.delete("");
-        await this.settings.update({ dictionary: [...dictionary].sort(cmpIgnoreCase) });
-        // Sync with language tool
-        await this.syncDictionary();
+        await this.settings.update(current => {
+            const dictionary = new Set(current.dictionary.map(w => w.trim()));
+            dictionary.delete("");
+            return { dictionary: [...dictionary].sort(cmpIgnoreCase) };
+        });
+        this.ensureNetworkTasks();
     }
 
     public onunload() {
@@ -84,7 +126,6 @@ export default class LanguageToolPlugin extends Plugin {
     public injectProperties(inject: boolean) {
         const properties = {
             "lt-language": "text",
-            "lt-possibleLanguages": "multitext",
             "lt-picky": "checkbox",
             "lt-autoCheck": "checkbox",
             "lt-dictionary": "multitext",
@@ -98,9 +139,8 @@ export default class LanguageToolPlugin extends Plugin {
                 unsetType: (key: string) => void;
             };
             // @ts-expect-error, not typed
-            let typeManager = (this.app as {
-                metadataTypeManager: MetadataTypeManager;
-            }).metadataTypeManager;
+            let typeManager = (this.app as { metadataTypeManager: MetadataTypeManager })
+                .metadataTypeManager;
             for (const [key, type] of Object.entries(properties)) {
                 if (inject) typeManager.setType(key, type);
                 else typeManager.unsetType(key);
@@ -193,32 +233,6 @@ export default class LanguageToolPlugin extends Plugin {
                 }
             },
         });
-        this.addCommand({
-            id: "previous",
-            name: "Jump to previous suggestion",
-            icon: "chevron-left",
-            editorCheckCallback: (checking, editor) => {
-                // @ts-expect-error, not typed
-                const editorView = editor.cm as EditorView;
-                const cursorOffset = editor.posToOffset(editor.getCursor("from"));
-                let lastMatch = null as { from: number; to: number } | null;
-                editorView.state
-                    .field(underlineDecoration)
-                    .between(0, cursorOffset - 1, (from, to) => {
-                        if (!lastMatch || lastMatch.from < from) {
-                            lastMatch = { from, to };
-                        }
-                    });
-                if (checking) {
-                    return lastMatch != null;
-                }
-                if (lastMatch != null) {
-                    editorView.dispatch({
-                        selection: { anchor: lastMatch.from, head: lastMatch.to },
-                    });
-                }
-            },
-        });
         for (let i = 1; i <= SUGGESTIONS; i++) {
             this.addCommand(this.applySuggestionCommand(i));
         }
@@ -227,6 +241,35 @@ export default class LanguageToolPlugin extends Plugin {
             name: "Show synonyms",
             icon: "square-stack",
             editorCheckCallback: (checking, editor) => this.showSynonyms(editor, checking),
+        });
+
+        this.addCommand({
+            id: "add-dict",
+            name: "Add to dictionary",
+            icon: "book-check",
+            editorCheckCallback: (checking, editor) => {
+                // @ts-expect-error, not typed
+                const editorView = editor.cm as EditorView;
+
+                let match = singleMatchAtCursor(editor, 0);
+                if (!match) return checking ? false : undefined;
+                if (!isWord(match.text)) return checking ? false : undefined;
+                if (checking) return true;
+
+                editorView.dispatch({
+                    effects: [clearMatchingUnderlines.of(m => m.text == match.text)],
+                });
+
+                this.settings
+                    .update(current => ({ dictionary: [...current.dictionary, match.text.trim()] }))
+                    .then(
+                        () => {},
+                        e => {
+                            console.error(e);
+                            this.pushLogs(e as Error);
+                        },
+                    );
+            },
         });
     }
 
@@ -238,34 +281,18 @@ export default class LanguageToolPlugin extends Plugin {
             editorCheckCallback(checking, editor) {
                 // @ts-expect-error, not typed
                 const editorView = editor.cm as EditorView;
-                const cursorOffset = editor.posToOffset(editor.getCursor());
 
-                const matches: { from: number; to: number; value: Decoration }[] = [];
-
-                // Get underline-matches at cursor
-                editorView.state
-                    .field(underlineDecoration)
-                    .between(cursorOffset, cursorOffset, (from, to, value) => {
-                        matches.push({ from, to, value });
-                    });
-
-                // Check that there is exactly one match that has a replacement in the slot that is called.
-                if (!matches || matches.length !== 1) return false;
-                const { from, to, value } = matches[0];
-
-                const underline = (value.spec as { underline?: api.LTLint }).underline;
-                const preconditions = underline && underline.replacements.length >= n;
-
-                if (checking) return preconditions;
-                if (!preconditions) return;
+                let match = singleMatchAtCursor(editor, n);
+                if (!match) return checking ? false : undefined;
+                if (checking) return true;
 
                 // At this point, the check must have been successful.
-                const change = { from, to, insert: underline.replacements[n - 1] };
+                const change = { ...match.range, insert: match.replacements[n - 1] };
 
                 // Insert the text of the match
                 editorView.dispatch({
                     changes: [change],
-                    effects: [clearUnderlinesInRange.of({ from, to })],
+                    effects: [clearUnderlinesInRange.of(match.range)],
                 });
             },
         };
@@ -351,21 +378,24 @@ export default class LanguageToolPlugin extends Plugin {
 
         submenu.addSeparator();
 
-        if (match.categoryId === "TYPOS") {
+        // single word lints
+        if (isWord(match.text)) {
             submenu.addItem(subItem => {
                 subItem.setTitle("Add to dictionary");
                 subItem.setIcon("plus-with-circle");
                 subItem.onClick(async () => {
-                    let dict = [...this.settings.options.dictionary, match.text.trim()];
-                    dict.sort(cmpIgnoreCase);
-                    await this.settings.update({ dictionary: dict });
+                    await this.settings.update(current => ({
+                        dictionary: [...current.dictionary, match.text.trim()].sort(cmpIgnoreCase),
+                    }));
                     await this.syncDictionary();
                     editor.dispatch({
                         effects: [clearMatchingUnderlines.of(m => m.text === match.text)],
                     });
                 });
             });
-        } else {
+        }
+        // Don't show this for obvious typos
+        if (lintClass(match.categoryId, match.ruleId) !== "lt-major") {
             submenu.addItem(subItem => {
                 subItem.setTitle("Ignore suggestion");
                 subItem.setIcon("cross");
@@ -379,10 +409,11 @@ export default class LanguageToolPlugin extends Plugin {
                     subItem.setTitle("Disable rule");
                     subItem.setIcon("circle-off");
                     subItem.onClick(async () => {
-                        let disabledRules = this.settings.options.disabledRules;
-                        if (disabledRules) disabledRules += "," + match.ruleId;
-                        else disabledRules = match.ruleId;
-                        await this.settings.update({ disabledRules });
+                        await this.settings.update(current => ({
+                            disabledRules: [...current.disabledRules, match.ruleId].sort(
+                                cmpIgnoreCase,
+                            ),
+                        }));
 
                         editor.dispatch({
                             effects: [clearMatchingUnderlines.of(m => m.ruleId === match.ruleId)],
@@ -455,17 +486,19 @@ export default class LanguageToolPlugin extends Plugin {
 
     public setStatusBarReady() {
         this.isLoading = false;
-        setIcon(this.statusBarItem, "spell-check");
+        if (this.statusBarItem) setIcon(this.statusBarItem, "spell-check");
     }
 
     public setStatusBarWorking() {
         if (this.isLoading) return;
 
         this.isLoading = true;
-        setIcon(this.statusBarItem, "sync-small");
+        if (this.statusBarItem) setIcon(this.statusBarItem, "sync-small");
     }
 
     private handleStatusBarClick() {
+        if (!this.statusBarItem) return;
+
         const statusBarRect = this.statusBarItem.getBoundingClientRect();
         const statusBarIconRect = this.statusBarItem.getBoundingClientRect();
 
@@ -518,35 +551,39 @@ export default class LanguageToolPlugin extends Plugin {
         const file = this.app.workspace.getActiveFile();
         const cache = file && this.app.metadataCache.getFileCache(file);
 
-        /* eslint-disable @typescript-eslint/no-unsafe-assignment */
+        // /* eslint-disable @typescript-eslint/no-unsafe-assignment */
         if (cache?.frontmatter != null) {
-            const language = cache.frontmatter["lt-language"] ?? cache.frontmatter["lt_language"];
-            const possibleLanguages =
-                cache.frontmatter["lt-possibleLanguages"] ??
-                cache.frontmatter["lt_possibleLanguages"];
-            const picky = cache.frontmatter["lt-picky"];
-            const autoCheck = cache.frontmatter["lt-autoCheck"];
-            const dictionary = cache.frontmatter["lt-dictionary"];
-            const disabledRules = cache.frontmatter["lt-disabledRules"];
-            const disabledCategories = cache.frontmatter["lt-disabledCategories"];
+            const language: unknown =
+                cache.frontmatter["lt-language"] ?? cache.frontmatter["lt_language"];
+            const picky: unknown = cache.frontmatter["lt-picky"];
+            const autoCheck: unknown = cache.frontmatter["lt-autoCheck"];
+            const dictionary: unknown = cache.frontmatter["lt-dictionary"];
+            const disabledRules: unknown = cache.frontmatter["lt-disabledRules"];
+            const disabledCategories: unknown = cache.frontmatter["lt-disabledCategories"];
 
             // Beware: shallow clone
             let settings = { ...this.settings.options };
             if (typeof language === "string") settings.staticLanguage = language;
-            if (typeof possibleLanguages === "string")
-                settings.possibleLanguages = normalizePossibleLanguages(possibleLanguages.split(","));
-            if (Array.isArray(possibleLanguages))
-                settings.possibleLanguages = normalizePossibleLanguages(possibleLanguages);
             if (typeof autoCheck === "boolean") settings.shouldAutoCheck = autoCheck;
             if (typeof picky === "boolean") settings.pickyMode = picky;
-            if (Array.isArray(dictionary)) settings.dictionary = dictionary;
-            if (Array.isArray(disabledRules) && disabledRules.length)
-                settings.disabledRules += "," + disabledRules.join(",");
-            if (Array.isArray(disabledCategories) && disabledCategories.length)
-                settings.disabledCategories += "," + disabledCategories.join(",");
+            if (Array.isArray(dictionary) && dictionary.every(item => typeof item === "string"))
+                settings.dictionary = dictionary;
+            if (
+                Array.isArray(disabledRules) &&
+                disabledRules.every(item => typeof item === "string")
+            )
+                settings.disabledRules = [...settings.disabledRules, ...disabledRules];
+            if (
+                Array.isArray(disabledCategories) &&
+                disabledCategories.every(item => typeof item === "string")
+            )
+                settings.disabledCategories = [
+                    ...settings.disabledCategories,
+                    ...disabledCategories,
+                ];
             return settings;
         }
-        /* eslint-enable @typescript-eslint/no-unsafe-assignment */
+        // /* eslint-enable @typescript-eslint/no-unsafe-assignment */
         return this.settings.options;
     }
 
@@ -587,8 +624,7 @@ export default class LanguageToolPlugin extends Plugin {
             console.debug(`Checking ${annotations.length()} characters...`);
             // console.debug("Text", JSON.stringify(annotations, undefined, "  "));
 
-            const result = await api.check(settings, offset, annotations);
-            matches = isAllowedDetectedLanguage(settings, result.detectedLanguage) ? result.matches : [];
+            matches = await api.check(settings, this.settings.getApiKey(), offset, annotations);
             // update range to the checked text
             if (range) range = { from: offset, to: offset + annotations.length() };
         } catch (e) {
@@ -624,7 +660,10 @@ export default class LanguageToolPlugin extends Plugin {
                 // Fixes a bug where the match is outside the document
                 if (match.range.to > editor.state.doc.length) continue;
                 // Ignore typos that are in the spellcheck dictionary
-                if (match.categoryId === "TYPOS" && spellcheckDictionary.includes(match.text))
+                if (
+                    lintClass(match.categoryId, match.ruleId) === "lt-major" &&
+                    spellcheckDictionary.includes(match.text.trim())
+                )
                     continue;
 
                 // Ignore whitespace lints inside tables
@@ -659,79 +698,101 @@ export default class LanguageToolPlugin extends Plugin {
         const debugString =
             `${new Date().toLocaleString()}:\n` +
             `Error: '${e.message}'\n` +
-            `Settings: ${JSON.stringify({ ...this.settings, username: "REDACTED", apikey: "REDACTED" })}\n`;
+            `Settings: ${JSON.stringify({ ...this.settings.options, username: "REDACTED", apikey: "REDACTED" })}\n`;
 
         this.logs.push(debugString);
         if (this.logs.length > 10) this.logs.shift();
     }
 
-    public async onExternalSettingsChange() {
-        await this.settings.load();
-        await this.settingTab.notifyEndpointChange(this.settings.options);
+    public ensureNetworkTasks(): void {
+        const apiKey = this.settings.getApiKey();
+        if (apiKey !== this.dictionaryApiKey) {
+            this.dictionaryApiKey = apiKey;
+            this.dictionaryTask.invalidate();
+        }
+        void this.languageTask.ensure();
+        void this.dictionaryTask.ensure();
     }
 
-    /**
-     * Synchronizes with the LanguageTool dictionary,
-     * returning whether the local dictionary has been changed.
-     */
-    public async syncDictionary(): Promise<void> {
+    public onSettingsChanged(
+        previous: Readonly<LTOptions>,
+        source: SettingsUpdateSource = "local",
+    ): void {
+        const current = this.settings.options;
+        if (previous.serverUrl !== current.serverUrl) {
+            this.languageTask.invalidate();
+            this.settingTab.setLanguages([]);
+        }
+        const dictionaryChanged =
+            JSON.stringify(previous.dictionary) !== JSON.stringify(current.dictionary);
+        if (source !== "local" && dictionaryChanged) this.settingTab.update();
+        const connectionChanged =
+            previous.serverUrl !== current.serverUrl ||
+            previous.username !== current.username ||
+            previous.apikeySecret !== current.apikeySecret ||
+            previous.syncDictionary !== current.syncDictionary;
         if (
-            !this.settings.options.syncDictionary ||
-            endpointFromUrl(this.settings.options.serverUrl) !== "premium"
+            connectionChanged ||
+            (source !== "sync" &&
+                (dictionaryChanged ||
+                    JSON.stringify(previous.pendingDictEdits) !==
+                        JSON.stringify(current.pendingDictEdits)))
         ) {
-            // Nothing to do
-            return;
+            this.dictionaryTask.invalidate();
+        }
+        this.ensureNetworkTasks();
+    }
+
+    public async onExternalSettingsChange() {
+        const previous = this.settings.options;
+        await this.settings.load();
+        this.onSettingsChanged(previous, "external");
+    }
+
+    public async syncDictionary(): Promise<void> {
+        this.dictionaryTask.invalidate();
+        this.ensureNetworkTasks();
+        await this.dictionaryTask.ensure();
+    }
+
+    private async reconcileDictionary(isCurrent: () => boolean): Promise<void> {
+        if (!isCurrent()) return;
+        const options = this.settings.options;
+        const apiKey = this.settings.getApiKey();
+        const current = () => isCurrent() && apiKey === this.settings.getApiKey();
+        if (!options.syncDictionary || endpointFromUrl(options.serverUrl) !== "premium") return;
+
+        const edits = options.pendingDictEdits;
+        for (const edit of edits) {
+            if (!current()) return;
+            if (edit.present) await api.wordsAdd(options, apiKey, edit.word);
+            else await api.wordsDel(options, apiKey, edit.word);
         }
 
-        try {
-            const lastWords = new Set(this.settings.options.remoteDictionary);
-            let localWords = new Set(this.settings.options.dictionary);
-            let remoteWords = new Set(await api.words(this.settings.options));
-
-            // words that have been removed locally
-            let localRemoved = setDifference(lastWords, localWords);
-            localRemoved = setIntersect(localRemoved, remoteWords);
-            for (const word of localRemoved) {
-                await api.wordsDel(this.settings.options, word);
-            }
-
-            // words that have been removed remotely
-            const remoteRemoved = setDifference(lastWords, remoteWords);
-
-            remoteWords = setDifference(remoteWords, localRemoved);
-            localWords = setDifference(localWords, remoteRemoved);
-
-            // words that have been added locally
-            const missingRemote = setDifference(localWords, remoteWords);
-            for (const word of missingRemote) {
-                await api.wordsAdd(this.settings.options, word);
-            }
-
-            // merge remaining words
-            const words = setUnion(remoteWords, localWords);
-            let dictionary = [...words].sort(cmpIgnoreCase);
-            await this.settings.update({ dictionary, remoteDictionary: dictionary });
-        } catch (e) {
-            const err = e as Error;
-            this.pushLogs(err);
-            new Notice(err.message, 30000);
-            console.error("Failed sync spellcheck with LanguageTool", e);
-        }
+        if (!current()) return;
+        const dictionary = [...new Set(await api.words(options, apiKey))].sort(cmpIgnoreCase);
+        if (current()) await this.settings.applyDictionarySync(dictionary, edits, current);
     }
 }
 
-function normalizePossibleLanguages(values: string[]): string[] {
-    return [...new Set(values.map(value => value.trim()).filter(Boolean))];
-}
+function singleMatchAtCursor(editor: Editor, minReplacements: number = 1): api.LTLint | undefined {
+    // @ts-expect-error, not typed
+    const editorView = editor.cm as EditorView;
+    const cursorOffset = editor.posToOffset(editor.getCursor());
 
-function isAllowedDetectedLanguage(settings: LTOptions, detectedLanguage?: string): boolean {
-    const possibleLanguages = settings.possibleLanguages;
-    if (settings.staticLanguage || !possibleLanguages?.length || !detectedLanguage) return true;
+    const matches: api.LTLint[] = [];
 
-    const detected = detectedLanguage.toLowerCase();
-    const detectedBase = detected.split("-")[0];
-    return possibleLanguages.some(language => {
-        const allowed = language.toLowerCase();
-        return allowed === detected || allowed.split("-")[0] === detectedBase;
-    });
+    // Get underline-matches at cursor
+    editorView.state
+        .field(underlineDecoration)
+        .between(cursorOffset, cursorOffset, (from, to, value) => {
+            let match = (value.spec as { underline?: api.LTMatch }).underline;
+            if (match) matches.push({ ...match, range: { from, to } });
+        });
+
+    // Check that there is exactly one match that has a replacement in the slot that is called.
+    if (!matches || matches.length !== 1) return undefined;
+    const underline = matches[0];
+    const preconditions = underline && underline.replacements.length >= minReplacements;
+    return preconditions ? underline : undefined;
 }

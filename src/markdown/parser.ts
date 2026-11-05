@@ -5,6 +5,8 @@ import { gfm } from "micromark-extension-gfm";
 import { gfmFromMarkdown } from "mdast-util-gfm";
 import { frontmatter } from "micromark-extension-frontmatter";
 import { frontmatterFromMarkdown } from "mdast-util-frontmatter";
+import { math } from "micromark-extension-math";
+import { mathFromMarkdown } from "mdast-util-math";
 
 import { AnnotatedText } from "../annotated";
 import { wikiLink } from "./micromark-wikilink";
@@ -20,10 +22,11 @@ export class SyntaxTree {
     constructor(text: string) {
         this.#raw = text;
         this.#tree = fromMarkdown(text, {
-            extensions: [gfm(), frontmatter(["yaml"]), wikiLink({ aliasDivider: "|" })],
+            extensions: [gfm(), frontmatter(["yaml"]), math(), wikiLink({ aliasDivider: "|" })],
             mdastExtensions: [
                 gfmFromMarkdown(),
                 frontmatterFromMarkdown(["yaml"]),
+                mathFromMarkdown(),
                 wikiLinkFromMarkdown(),
             ],
         });
@@ -142,6 +145,7 @@ class AnnotationVisitor {
                 break;
             case "yaml":
             case "code":
+            case "math":
             case "html":
             case "image":
             case "imageReference":
@@ -160,8 +164,11 @@ class AnnotationVisitor {
                 node.children.forEach(child => this.visitRoot(child));
                 this.output.pushMarkup("", "\n\n");
                 break;
+            case "inlineMath":
             case "inlineCode":
-                this.output.pushMarkup(emptyMarkup(startOffset, endOffset), node.value);
+                // Give this a placeholder so that sentences have a subject/object.
+                // Otherwise the grammar checking might become confused with the sentence structure.
+                this.output.pushMarkup(emptyMarkup(startOffset, endOffset), "DUMMY");
                 this.offset = endOffset;
                 break;
             case "break":
@@ -236,7 +243,8 @@ function addText(text: string, output: AnnotatedText) {
 
 function addLines(text: string, parsed: string, output: AnnotatedText) {
     const [first, ...reminder] = text.replace(/\n$/, "").split("\n");
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    // The first parsed line is intentionally unused; only the remaining lines are compared.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- pfirst is needed to collect premider.
     const [pfirst, ...premider] = parsed.replace(/\n$/, "").split("\n");
 
     if (reminder.length !== premider.length) {
@@ -251,7 +259,8 @@ function addLines(text: string, parsed: string, output: AnnotatedText) {
         const pline = premider[i];
 
         let indent = line.length - pline.length;
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        // The match value is intentionally unused; each match represents one escape character.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- only the match count affects indent.
         for (const m of line.matchAll(ESCAPE)) {
             indent -= 1; // each escape character is one longer
         }
@@ -275,11 +284,12 @@ function isBlock(node: RootContent): node is BlockContent {
     return [
         "blockquote",
         "code",
+        "math",
         "heading",
         "html",
         "list",
         "paragraph",
         "table",
         "thematicBreak",
-    ].contains(node.type);
+    ].includes(node.type);
 }

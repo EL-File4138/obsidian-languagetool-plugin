@@ -1,11 +1,11 @@
 import { EditorView, Tooltip, hoverTooltip } from "@codemirror/view";
 import { Extension } from "@codemirror/state";
-import { categoryCssClass } from "../helpers";
+import { lintClass } from "../helpers";
 import { ButtonComponent, setIcon } from "obsidian";
-import { default as LanguageToolPlugin } from "main";
+import { default as LanguageToolPlugin } from "../main";
 import { clearUnderlinesInRange, underlineDecoration, clearMatchingUnderlines } from "./underlines";
-import * as api from "api";
-import { SUGGESTIONS } from "settings";
+import * as api from "../api";
+import { SUGGESTIONS } from "../settings";
 
 function createTooltip(
     plugin: LanguageToolPlugin,
@@ -16,8 +16,9 @@ function createTooltip(
     const replacements = match.replacements.slice(0, SUGGESTIONS / 2);
     const category = match.categoryId;
     const ruleId = match.ruleId;
+    const categoryClass = lintClass(category, ruleId);
 
-    return createDiv({ cls: ["lt-tooltip", categoryCssClass(category)] }, root => {
+    return createDiv({ cls: ["lt-tooltip", categoryClass] }, root => {
         if (match.title) root.createSpan({ cls: "lt-title", text: match.title });
         if (match.message) root.createSpan({ cls: "lt-message", text: match.message });
 
@@ -37,14 +38,15 @@ function createTooltip(
         });
 
         root.createDiv({ cls: "lt-ignore-container" }, container => {
-            if (category === "TYPOS") {
+            if (categoryClass === "lt-major") {
                 container.createDiv({ cls: "lt-ignore-btn" }, button => {
                     setIcon(button.createSpan(), "plus-with-circle");
                     button.createSpan({ text: "Add to dictionary" });
                     button.onclick = async () => {
                         // Add to global dictionary
-                        let dictionary = [...plugin.settings.options.dictionary, match.text.trim()];
-                        await plugin.settings.update({ dictionary });
+                        let dictionary = new Set(plugin.settings.options.dictionary);
+                        dictionary.add(match.text.trim());
+                        await plugin.settings.update({ dictionary: [...dictionary].sort() });
                         // Remove other underlines with the same word
                         view.dispatch({
                             effects: [clearMatchingUnderlines.of(m => m.text === match.text)],
@@ -63,10 +65,11 @@ function createTooltip(
                         setIcon(button.createSpan(), "circle-off");
                         button.createSpan({ text: "Disable rule" });
                         button.onclick = async () => {
-                            let disabledRules = plugin.settings.options.disabledRules;
-                            if (disabledRules) disabledRules += "," + ruleId;
-                            else disabledRules = ruleId;
-                            await plugin.settings.update({ disabledRules });
+                            let disabledRules = new Set(plugin.settings.options.disabledRules);
+                            disabledRules.add(ruleId);
+                            await plugin.settings.update({
+                                disabledRules: [...disabledRules].sort(),
+                            });
 
                             // Remove other underlines of the same rule
                             view.dispatch({
@@ -127,7 +130,6 @@ function lintTooltip(
 }
 
 export function buildHoverTooltip(plugin: LanguageToolPlugin): Extension {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
     return hoverTooltip(lintTooltip.bind(null, plugin), { hideOnChange: true });
 }
 

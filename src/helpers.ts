@@ -1,5 +1,15 @@
+export type LintClass = "lt-minor" | "lt-style" | "lt-major";
+
 // Assign a CSS class based on a rule's category ID
-export function categoryCssClass(categoryId: string): string {
+export function lintClass(categoryId: string, ruleId: string): LintClass {
+    // Newer form of spelling errors (probably using LLMs in the backend)
+    if (
+        ruleId.includes("SPELLING") ||
+        (ruleId.startsWith("QB_NEW_EN_") && ruleId.includes("ORTHOGRAPHY"))
+    ) {
+        return "lt-major";
+    }
+
     switch (categoryId) {
         case "COLLOQUIALISMS":
         case "REDUNDANCY":
@@ -37,8 +47,14 @@ export function setIntersect<T>(setA: Set<T>, setB: Set<T>): Set<T> {
     return intersection;
 }
 
-export function cmpIgnoreCase(a: string, b: string): -1 | 0 | 1 {
-    a = a.toLowerCase();
-    b = b.toLowerCase();
-    return a > b ? 1 : a < b ? -1 : 0;
+export function isWord(text: string): boolean {
+    return /^(?=.*\p{L})[\P{P}_-](?:\S*[\P{P}_-])?$/u.test(text.trim());
+}
+
+export function cmpIgnoreCase(a: string, b: string): number {
+    return a.localeCompare(b);
+}
+
+export function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
